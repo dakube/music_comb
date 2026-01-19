@@ -42,6 +42,12 @@ impl Default for MidiVisualizer {
     }
 }
 
+struct CombSegment {
+    start_time: f32,
+    end_time: f32,
+    spacing: f32,
+}
+
 impl MidiVisualizer {
     fn load_midi(&mut self, path: std::path::PathBuf) {
         let Ok(data) = fs::read(&path) else { return };
@@ -111,41 +117,146 @@ impl MidiVisualizer {
 
     fn generate_svg(&self) -> String {
         let mut svg_content = String::new();
-        let mut max_x = 0.0;
 
-        if let Some(tracks) = &self.tracks {
-            if let Some(track_data) = tracks.get(self.selected_track) {
-                for note in &track_data.notes {
-                    let spacing = self.calculate_spacing(note.pitch);
-                    let start_x = note.start_time * self.px_per_beat;
-                    let duration_px = note.duration * self.px_per_beat;
+        let segments = self.get_comb_segments();
+        if segments.is_empty() {
+            return format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="50" height="100"></svg>"#
+            );
+        }
 
-                    // We draw bars starting at the note onset until the duration is exhausted
-                    let mut offset = 0.0;
-                    while offset < duration_px {
-                        let current_x = start_x + offset;
+        let x_offset = segments.first().unwrap().start_time * self.px_per_beat;
+        let mut max_x: f32 = 0.0;
+
+        for segment in &segments {
+            let start_x = segment.start_time * self.px_per_beat;
+            let end_x = segment.end_time * self.px_per_beat;
+            let spacing = segment.spacing;
+
+            if spacing > 0.1 {
+                let first_tooth_index = (start_x / spacing).ceil() as i64;
+                let mut current_x_abs = first_tooth_index as f32 * spacing;
+
+                while current_x_abs < end_x {
+                    let current_x_relative = current_x_abs - x_offset;
+                    // Use a small epsilon to avoid floating point issues at the start
+                    if current_x_relative >= -f32::EPSILON {
                         svg_content.push_str(&format!(
                             r#"<line x1="{:.2}" y1="0" x2="{:.2}" y2="100" stroke="black" stroke-width="0.5" />"#,
-                            current_x, current_x
+                            current_x_relative, current_x_relative
                         ));
-                        offset += spacing;
-                        if offset > duration_px {
-                            break;
-                        }
                     }
-                    let end_x = start_x + duration_px;
-                    if end_x > max_x {
-                        max_x = end_x;
-                    }
+                    current_x_abs += spacing;
                 }
             }
+            max_x = max_x.max(end_x);
         }
+
+        let total_width = max_x - x_offset;
 
         format!(
             r#"<svg xmlns="http://www.w3.org/2000/svg" width="{:.2}" height="100">{}</svg>"#,
-            max_x + 50.0,
+            total_width + 50.0,
             svg_content
         )
+    }
+
+    fn get_comb_segments(&self) -> Vec<CombSegment> {
+        let Some(tracks) = &self.tracks else {
+            return vec![];
+        };
+        let Some(track_data) = tracks.get(self.selected_track) else {
+            return vec![];
+        };
+
+        if track_data.notes.is_empty() {
+            return vec![];
+        }
+
+        #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+        enum EventType {
+            On,
+            Off,
+        }
+        struct Event {
+            time: f32,
+            kind: EventType,
+            pitch: u8,
+        }
+        let mut events = Vec::new();
+        for note in &track_data.notes {
+            events.push(Event {
+                time: note.start_time,
+                kind: EventType::On,
+                pitch: note.pitch,
+            });
+            events.push(Event {
+                time: note.start_time + note.duration,
+                kind: EventType::Off,
+                pitch: note.pitch,
+            });
+        }
+        events.sort_by(|a, b| {
+            a.time
+                .partial_cmp(&b.time)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.kind.cmp(&b.kind))
+        });
+
+        let mut segments = Vec::new();
+        let mut active_pitches = std::collections::BTreeSet::new();
+        let mut last_time = if events.is_empty() {
+            0.0
+        } else {
+            events[0].time
+        };
+
+        for event in &events {
+            let current_time = event.time;
+            if current_time > last_time && !active_pitches.is_empty() {
+                if let Some(&highest_pitch) = active_pitches.iter().last() {
+                    segments.push(CombSegment {
+                        start_time: last_time,
+                        end_time: current_time,
+                        spacing: self.calculate_spacing(highest_pitch),
+                    });
+                }
+            }
+
+            match event.kind {
+                EventType::On => {
+                    active_pitches.insert(event.pitch);
+                }
+                EventType::Off => {
+                    active_pitches.remove(&event.pitch);
+                }
+            }
+            last_time = current_time;
+        }
+
+        // Merge segments
+        if segments.is_empty() {
+            return vec![];
+        }
+
+        let mut merged = Vec::new();
+        let mut iter = segments.into_iter();
+        let mut current = iter.next().unwrap();
+
+        for next in iter {
+            // Using an epsilon for f32 comparison
+            if (next.spacing - current.spacing).abs() < f32::EPSILON
+                && (next.start_time - current.end_time).abs() < f32::EPSILON
+            {
+                current.end_time = next.end_time;
+            } else {
+                merged.push(current);
+                current = next;
+            }
+        }
+        merged.push(current);
+
+        merged
     }
 }
 
@@ -263,31 +374,37 @@ impl eframe::App for MidiVisualizer {
 
                 if let Some(tracks) = &self.tracks {
                     if let Some(track_data) = tracks.get(self.selected_track) {
-                        for note in &track_data.notes {
-                            let spacing = self.calculate_spacing(note.pitch);
-                            let start_x = rect.min.x + (note.start_time * self.px_per_beat);
-                            let duration_px = note.duration * self.px_per_beat;
+                        let segments = self.get_comb_segments();
+                        for segment in &segments {
+                            let start_x_abs = segment.start_time * self.px_per_beat;
+                            let end_x_abs = segment.end_time * self.px_per_beat;
+                            let spacing = segment.spacing;
 
-                            let mut offset = 0.0;
-                            while offset < duration_px {
-                                let current_x = start_x + offset;
+                            if spacing > 0.1 {
+                                let first_tooth_index = (start_x_abs / spacing).ceil() as i64;
+                                let mut current_x_abs = first_tooth_index as f32 * spacing;
 
-                                // Optimization: Only draw if within the visible clip rect
-                                if ui.clip_rect().x_range().contains(current_x) {
-                                    painter.line_segment(
-                                        [
-                                            egui::pos2(current_x, rect.center().y - 60.0),
-                                            egui::pos2(current_x, rect.center().y + 60.0),
-                                        ],
-                                        egui::Stroke::new(
-                                            1.2,
-                                            egui::Color32::from_rgb(0, 255, 200),
-                                        ),
-                                    );
-                                }
-                                offset += spacing;
-                                if spacing < 0.1 || offset > duration_px {
-                                    break;
+                                while current_x_abs < end_x_abs {
+                                    let current_x_screen = rect.min.x + current_x_abs;
+                                    if ui.clip_rect().x_range().contains(current_x_screen) {
+                                        painter.line_segment(
+                                            [
+                                                egui::pos2(
+                                                    current_x_screen,
+                                                    rect.center().y - 60.0,
+                                                ),
+                                                egui::pos2(
+                                                    current_x_screen,
+                                                    rect.center().y + 60.0,
+                                                ),
+                                            ],
+                                            egui::Stroke::new(
+                                                1.2,
+                                                egui::Color32::from_rgb(0, 255, 200),
+                                            ),
+                                        );
+                                    }
+                                    current_x_abs += spacing;
                                 }
                             }
                         }
