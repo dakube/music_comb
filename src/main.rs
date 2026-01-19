@@ -23,6 +23,7 @@ struct MidiVisualizer {
     file_path: String,
     export_status: String,
     scroll_offset: f32, // Horizontal scroll position
+    scroll_to: Option<f32>,
 }
 
 impl Default for MidiVisualizer {
@@ -36,6 +37,7 @@ impl Default for MidiVisualizer {
             file_path: "No file loaded".to_string(),
             export_status: String::new(),
             scroll_offset: 0.0,
+            scroll_to: None,
         }
     }
 }
@@ -96,6 +98,7 @@ impl MidiVisualizer {
         self.file_path = path.to_string_lossy().into_owned();
         self.selected_track = 0;
         self.scroll_offset = 0.0;
+        self.scroll_to = None;
     }
 
     fn calculate_spacing(&self, pitch: u8) -> f32 {
@@ -195,16 +198,22 @@ impl eframe::App for MidiVisualizer {
                 if let Some(tracks) = &self.tracks {
                     if let Some(track) = tracks.get(self.selected_track) {
                         if let Some(first_note) = track.notes.first() {
-                            self.scroll_offset = first_note.start_time * self.px_per_beat - 50.0;
+                            self.scroll_to = Some(first_note.start_time * self.px_per_beat - 50.0);
                         }
                     }
                 }
             }
-            ui.add(
-                egui::DragValue::new(&mut self.scroll_offset)
-                    .prefix("Scroll X: ")
-                    .speed(5.0),
-            );
+            let mut dv_offset = self.scroll_offset;
+            if ui
+                .add(
+                    egui::DragValue::new(&mut dv_offset)
+                        .prefix("Scroll X: ")
+                        .speed(5.0),
+                )
+                .changed()
+            {
+                self.scroll_to = Some(dv_offset);
+            }
 
             ui.separator();
             if ui.button("🖼 Export SVG").clicked() {
@@ -233,66 +242,71 @@ impl eframe::App for MidiVisualizer {
                 }
             }
 
-            egui::ScrollArea::horizontal()
-                .scroll_offset(egui::vec2(self.scroll_offset, 0.0))
-                .show(ui, |ui| {
-                    let (response, painter) = ui.allocate_painter(
-                        egui::vec2(total_width, ui.available_height()),
-                        egui::Sense::click(),
-                    );
-                    let rect = response.rect;
+            let mut scroll_area = egui::ScrollArea::horizontal();
+            if let Some(offset) = self.scroll_to.take() {
+                scroll_area = scroll_area.scroll_offset(egui::vec2(offset, 0.0));
+                // Update display state immediately for responsiveness
+                self.scroll_offset = offset;
+            }
 
-                    // Capture actual scroll offset from the ScrollArea to sync with the sidebar value
-                    self.scroll_offset = (ui.clip_rect().left() - rect.left()).max(0.0);
+            scroll_area.show(ui, |ui| {
+                let (response, painter) = ui.allocate_painter(
+                    egui::vec2(total_width, ui.available_height()),
+                    egui::Sense::click(),
+                );
+                let rect = response.rect;
 
-                    painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(20, 20, 25));
+                // Capture actual scroll offset from the ScrollArea to sync with the sidebar value
+                self.scroll_offset = (ui.clip_rect().left() - rect.left()).max(0.0);
 
-                    if let Some(tracks) = &self.tracks {
-                        if let Some(track_data) = tracks.get(self.selected_track) {
-                            for note in &track_data.notes {
-                                let spacing = self.calculate_spacing(note.pitch);
-                                let start_x = rect.min.x + (note.start_time * self.px_per_beat);
-                                let duration_px = note.duration * self.px_per_beat;
+                painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(20, 20, 25));
 
-                                let mut offset = 0.0;
-                                while offset < duration_px {
-                                    let current_x = start_x + offset;
+                if let Some(tracks) = &self.tracks {
+                    if let Some(track_data) = tracks.get(self.selected_track) {
+                        for note in &track_data.notes {
+                            let spacing = self.calculate_spacing(note.pitch);
+                            let start_x = rect.min.x + (note.start_time * self.px_per_beat);
+                            let duration_px = note.duration * self.px_per_beat;
 
-                                    // Optimization: Only draw if within the visible clip rect
-                                    if ui.clip_rect().x_range().contains(current_x) {
-                                        painter.line_segment(
-                                            [
-                                                egui::pos2(current_x, rect.center().y - 60.0),
-                                                egui::pos2(current_x, rect.center().y + 60.0),
-                                            ],
-                                            egui::Stroke::new(
-                                                1.2,
-                                                egui::Color32::from_rgb(0, 255, 200),
-                                            ),
-                                        );
-                                    }
-                                    offset += spacing;
-                                    if spacing < 0.1 || offset > duration_px {
-                                        break;
-                                    }
+                            let mut offset = 0.0;
+                            while offset < duration_px {
+                                let current_x = start_x + offset;
+
+                                // Optimization: Only draw if within the visible clip rect
+                                if ui.clip_rect().x_range().contains(current_x) {
+                                    painter.line_segment(
+                                        [
+                                            egui::pos2(current_x, rect.center().y - 60.0),
+                                            egui::pos2(current_x, rect.center().y + 60.0),
+                                        ],
+                                        egui::Stroke::new(
+                                            1.2,
+                                            egui::Color32::from_rgb(0, 255, 200),
+                                        ),
+                                    );
+                                }
+                                offset += spacing;
+                                if spacing < 0.1 || offset > duration_px {
+                                    break;
                                 }
                             }
-
-                            // Draw a visual reference line
-                            painter.line_segment(
-                                [
-                                    egui::pos2(rect.min.x, rect.center().y + 60.0),
-                                    egui::pos2(rect.max.x, rect.center().y + 60.0),
-                                ],
-                                egui::Stroke::new(1.0, egui::Color32::GRAY),
-                            );
                         }
-                    } else {
-                        ui.centered_and_justified(|ui| {
-                            ui.label("Please load a MIDI file to generate patterns.");
-                        });
+
+                        // Draw a visual reference line
+                        painter.line_segment(
+                            [
+                                egui::pos2(rect.min.x, rect.center().y + 60.0),
+                                egui::pos2(rect.max.x, rect.center().y + 60.0),
+                            ],
+                            egui::Stroke::new(1.0, egui::Color32::GRAY),
+                        );
                     }
-                });
+                } else {
+                    ui.centered_and_justified(|ui| {
+                        ui.label("Please load a MIDI file to generate patterns.");
+                    });
+                }
+            });
         });
     }
 }
