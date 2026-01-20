@@ -2,6 +2,8 @@
 name = "midi_to_bar"
 version = "0.1.0"
 edition = "2024"
+authors = ["Francis Goyette <goyettef@gmail.com>"]
+description = "A simple app to create musical combs from midi file"
 
 [[bin]]
 name = "midi_to_bar"
