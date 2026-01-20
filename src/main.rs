@@ -107,10 +107,10 @@ impl MidiVisualizer {
         self.scroll_to = None;
     }
 
-    fn calculate_spacing(&self, pitch: u8) -> f32 {
+    fn calculate_spacing(&self, pitch: f32) -> f32 {
         // f = 440 * 2^((n-69)/12)
         let ref_freq = 440.0 * 2.0f32.powf((self.ref_note as f32 - 69.0) / 12.0);
-        let note_freq = 440.0 * 2.0f32.powf((pitch as f32 - 69.0) / 12.0);
+        let note_freq = 440.0 * 2.0f32.powf((pitch - 69.0) / 12.0);
         // Spacing is wavelength: S = S_ref * (F_ref / F_note)
         self.ref_spacing * (ref_freq / note_freq)
     }
@@ -214,13 +214,13 @@ impl MidiVisualizer {
         for event in &events {
             let current_time = event.time;
             if current_time > last_time && !active_pitches.is_empty() {
-                if let Some(&highest_pitch) = active_pitches.iter().last() {
-                    segments.push(CombSegment {
-                        start_time: last_time,
-                        end_time: current_time,
-                        spacing: self.calculate_spacing(highest_pitch),
-                    });
-                }
+                let sum_of_pitches: f32 = active_pitches.iter().map(|&p| p as f32).sum();
+                let average_pitch = sum_of_pitches / active_pitches.len() as f32;
+                segments.push(CombSegment {
+                    start_time: last_time,
+                    end_time: current_time,
+                    spacing: self.calculate_spacing(average_pitch),
+                });
             }
 
             match event.kind {
@@ -421,63 +421,99 @@ impl eframe::App for MidiVisualizer {
                             }
                         }
 
-                        // Draw note labels
-                        let y_base = rect.center().y + 80.0;
-                        let marker_height = 10.0;
-                        for note in &track_data.notes {
-                            let start_x_abs = note.start_time * self.px_per_beat;
-                            let end_x_abs = (note.start_time + note.duration) * self.px_per_beat;
+                        // Draw note labels with vertical layout to avoid overlap
+                        {
+                            struct NoteWithLane<'a> {
+                                note: &'a MidiNote,
+                                lane: usize,
+                            }
+                            let mut notes_with_lanes: Vec<NoteWithLane> =
+                                Vec::with_capacity(track_data.notes.len());
+                            let mut lane_end_times: Vec<f32> = Vec::new();
 
-                            let start_x_screen = rect.min.x + start_x_abs;
-                            let end_x_screen = rect.min.x + end_x_abs;
+                            for note in &track_data.notes {
+                                let mut placed_in_lane = None;
+                                for (i, end_time) in lane_end_times.iter_mut().enumerate() {
+                                    if note.start_time >= *end_time {
+                                        placed_in_lane = Some(i);
+                                        *end_time = note.start_time + note.duration;
+                                        break;
+                                    }
+                                }
 
-                            // Cull notes that are not in the visible range at all
-                            if end_x_screen < ui.clip_rect().left()
-                                || start_x_screen > ui.clip_rect().right()
-                            {
-                                continue;
+                                let lane = match placed_in_lane {
+                                    Some(i) => i,
+                                    None => {
+                                        let new_lane_index = lane_end_times.len();
+                                        lane_end_times.push(note.start_time + note.duration);
+                                        new_lane_index
+                                    }
+                                };
+                                notes_with_lanes.push(NoteWithLane { note, lane });
                             }
 
-                            // Draw start and end markers
-                            painter.line_segment(
-                                [
-                                    egui::pos2(start_x_screen, y_base - marker_height / 2.0),
-                                    egui::pos2(start_x_screen, y_base + marker_height / 2.0),
-                                ],
-                                egui::Stroke::new(1.0, egui::Color32::from_gray(100)),
-                            );
-                            painter.line_segment(
-                                [
-                                    egui::pos2(end_x_screen, y_base - marker_height / 2.0),
-                                    egui::pos2(end_x_screen, y_base + marker_height / 2.0),
-                                ],
-                                egui::Stroke::new(1.0, egui::Color32::from_gray(100)),
-                            );
+                            let y_base = rect.center().y + 80.0;
+                            let lane_height = 15.0;
+                            let marker_height = 10.0;
 
-                            // Draw horizontal line for the note duration
-                            painter.line_segment(
-                                [
-                                    egui::pos2(start_x_screen, y_base),
-                                    egui::pos2(end_x_screen, y_base),
-                                ],
-                                egui::Stroke::new(0.5, egui::Color32::from_gray(100)),
-                            );
+                            for item in &notes_with_lanes {
+                                let note = item.note;
+                                let lane = item.lane;
+                                let y_pos = y_base + (lane as f32 * lane_height);
 
-                            let note_name = self.midi_pitch_to_name(note.pitch);
-                            let note_width_px = end_x_screen - start_x_screen;
+                                let start_x_abs = note.start_time * self.px_per_beat;
+                                let end_x_abs =
+                                    (note.start_time + note.duration) * self.px_per_beat;
 
-                            // Only draw text if it fits, to avoid clutter
-                            if note_width_px > note_name.len() as f32 * 7.0 + 4.0 {
-                                painter.text(
-                                    egui::pos2((start_x_screen + end_x_screen) / 2.0, y_base),
-                                    egui::Align2::CENTER_CENTER,
-                                    note_name,
-                                    egui::FontId::proportional(12.0),
-                                    egui::Color32::from_gray(200),
+                                let start_x_screen = rect.min.x + start_x_abs;
+                                let end_x_screen = rect.min.x + end_x_abs;
+
+                                if end_x_screen < ui.clip_rect().left()
+                                    || start_x_screen > ui.clip_rect().right()
+                                {
+                                    continue;
+                                }
+
+                                // Draw start and end markers
+                                painter.line_segment(
+                                    [
+                                        egui::pos2(start_x_screen, y_pos - marker_height / 2.0),
+                                        egui::pos2(start_x_screen, y_pos + marker_height / 2.0),
+                                    ],
+                                    egui::Stroke::new(1.0, egui::Color32::from_gray(100)),
                                 );
+                                painter.line_segment(
+                                    [
+                                        egui::pos2(end_x_screen, y_pos - marker_height / 2.0),
+                                        egui::pos2(end_x_screen, y_pos + marker_height / 2.0),
+                                    ],
+                                    egui::Stroke::new(1.0, egui::Color32::from_gray(100)),
+                                );
+
+                                // Draw horizontal line for the note duration
+                                painter.line_segment(
+                                    [
+                                        egui::pos2(start_x_screen, y_pos),
+                                        egui::pos2(end_x_screen, y_pos),
+                                    ],
+                                    egui::Stroke::new(0.5, egui::Color32::from_gray(100)),
+                                );
+
+                                let note_name = self.midi_pitch_to_name(note.pitch);
+                                let note_width_px = end_x_screen - start_x_screen;
+
+                                // Only draw text if it fits, to avoid clutter
+                                if note_width_px > note_name.len() as f32 * 7.0 + 4.0 {
+                                    painter.text(
+                                        egui::pos2((start_x_screen + end_x_screen) / 2.0, y_pos),
+                                        egui::Align2::CENTER_CENTER,
+                                        note_name,
+                                        egui::FontId::proportional(12.0),
+                                        egui::Color32::from_gray(200),
+                                    );
+                                }
                             }
                         }
-
                         // Draw a visual reference line
                         painter.line_segment(
                             [
