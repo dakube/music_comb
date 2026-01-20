@@ -355,10 +355,13 @@ impl eframe::App for MidiVisualizer {
             let mut total_width = ui.available_width();
             if let Some(tracks) = &self.tracks {
                 if let Some(track_data) = tracks.get(self.selected_track) {
-                    if let Some(last_note) = track_data.notes.last() {
-                        let end_x = (last_note.start_time + last_note.duration) * self.px_per_beat;
-                        total_width = total_width.max(end_x + 100.0);
-                    }
+                    let max_end_time = track_data
+                        .notes
+                        .iter()
+                        .map(|n| n.start_time + n.duration)
+                        .fold(0.0, f32::max);
+                    let end_x = max_end_time * self.px_per_beat;
+                    total_width = total_width.max(end_x + 100.0);
                 }
             }
 
