@@ -258,6 +258,15 @@ impl MidiVisualizer {
 
         merged
     }
+
+    fn midi_pitch_to_name(&self, pitch: u8) -> String {
+        const NOTE_NAMES: [&str; 12] = [
+            "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+        ];
+        let octave = (pitch as i16 / 12) - 1;
+        let note_index = (pitch % 12) as usize;
+        format!("{}{}", NOTE_NAMES[note_index], octave)
+    }
 }
 
 impl eframe::App for MidiVisualizer {
@@ -406,6 +415,63 @@ impl eframe::App for MidiVisualizer {
                                     }
                                     current_x_abs += spacing;
                                 }
+                            }
+                        }
+
+                        // Draw note labels
+                        let y_base = rect.center().y + 80.0;
+                        let marker_height = 10.0;
+                        for note in &track_data.notes {
+                            let start_x_abs = note.start_time * self.px_per_beat;
+                            let end_x_abs = (note.start_time + note.duration) * self.px_per_beat;
+
+                            let start_x_screen = rect.min.x + start_x_abs;
+                            let end_x_screen = rect.min.x + end_x_abs;
+
+                            // Cull notes that are not in the visible range at all
+                            if end_x_screen < ui.clip_rect().left()
+                                || start_x_screen > ui.clip_rect().right()
+                            {
+                                continue;
+                            }
+
+                            // Draw start and end markers
+                            painter.line_segment(
+                                [
+                                    egui::pos2(start_x_screen, y_base - marker_height / 2.0),
+                                    egui::pos2(start_x_screen, y_base + marker_height / 2.0),
+                                ],
+                                egui::Stroke::new(1.0, egui::Color32::from_gray(100)),
+                            );
+                            painter.line_segment(
+                                [
+                                    egui::pos2(end_x_screen, y_base - marker_height / 2.0),
+                                    egui::pos2(end_x_screen, y_base + marker_height / 2.0),
+                                ],
+                                egui::Stroke::new(1.0, egui::Color32::from_gray(100)),
+                            );
+
+                            // Draw horizontal line for the note duration
+                            painter.line_segment(
+                                [
+                                    egui::pos2(start_x_screen, y_base),
+                                    egui::pos2(end_x_screen, y_base),
+                                ],
+                                egui::Stroke::new(0.5, egui::Color32::from_gray(100)),
+                            );
+
+                            let note_name = self.midi_pitch_to_name(note.pitch);
+                            let note_width_px = end_x_screen - start_x_screen;
+
+                            // Only draw text if it fits, to avoid clutter
+                            if note_width_px > note_name.len() as f32 * 7.0 + 4.0 {
+                                painter.text(
+                                    egui::pos2((start_x_screen + end_x_screen) / 2.0, y_base),
+                                    egui::Align2::CENTER_CENTER,
+                                    note_name,
+                                    egui::FontId::proportional(12.0),
+                                    egui::Color32::from_gray(200),
+                                );
                             }
                         }
 
