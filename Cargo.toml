@@ -3,6 +3,11 @@ name = "midi_to_bar"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "midi_to_bar"
+path = "src/main.rs"
+windows_subsystem = "windows"
+
 [dependencies]
 eframe = { version = "0.33.3", features = ["wgpu", "glow", "default_fonts"] }
 image = "0.25.9"
